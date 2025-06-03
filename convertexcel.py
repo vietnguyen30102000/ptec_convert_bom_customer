@@ -314,7 +314,7 @@ def generate_summary_report(bom_df, combined_df):
 
 def main_process(input_path):
     required_sheets = ['BOM', 'MFG']
-    company_template_path = "QUOTE_TEMPLATE_AMAT-SINGLE.xlsx"
+    company_template_path = "Renew_Template.xlsx"
 
     # Load customer BOM from provided file path
     all_sheets = load_customer_bom(input_path)
