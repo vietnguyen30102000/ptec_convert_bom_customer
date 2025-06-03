@@ -4,7 +4,6 @@ from openpyxl.styles import PatternFill, Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl import load_workbook
 import os
-from tkinter import Tk, filedialog
 import datetime
 import pyodbc
 import streamlit as st
