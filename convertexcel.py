@@ -1,24 +1,32 @@
+# convertexcel.py
+
 import pandas as pd
 import openpyxl
 from openpyxl.styles import PatternFill, Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl import load_workbook
 import os
-import datetime
-# import pyodbc
-import streamlit as st
-from sqlalchemy import create_engine
-import urllib
+import pyodbc
+from dotenv import load_dotenv
+import tempfile
+
+# Load environment variables from .env
+load_dotenv()
 
 def get_db_connection():
-    server = st.secrets["SQL_SERVER"]
-    database = st.secrets["SQL_DATABASE"]
-    username = st.secrets["SQL_USER"]
-    password = st.secrets["SQL_PASSWORD"]
+    server = os.getenv('SQL_SERVER')
+    database = os.getenv('SQL_DATABASE')
+    username = os.getenv('SQL_USER')
+    password = os.getenv('SQL_PASSWORD')
 
-    connection_url = f"mssql+pytds://{username}:{password}@{server}/{database}"
-    engine = create_engine(connection_url)
-    return engine
+    conn_str = (
+        f'DRIVER={{SQL Server}};'
+        f'SERVER={server};'
+        f'DATABASE={database};'
+        f'UID={username};'
+        f'PWD={password}'
+    )
+    return pyodbc.connect(conn_str)
 
 def clean_cell(val):
     try:
@@ -26,102 +34,49 @@ def clean_cell(val):
     except:
         return val
 
-# =====================
-# STEP 1: Load customer BOM Excel
-# =====================
-
-def load_customer_bom(file_path):
-    """Loads all sheets from the Excel file at a given path."""
-    all_sheets = pd.read_excel(file_path, sheet_name=None)
-    return all_sheets
-
-# =====================
-# STEP 2: Check required sheets
-# =====================
 def validate_required_sheets(all_sheets, required_sheets):
-    """Validates that all required sheets are present in the loaded Excel file."""
     missing = [s for s in required_sheets if s not in all_sheets]
     if missing:
         raise ValueError(f"❌ Missing required sheets: {', '.join(missing)}")
     return all_sheets['BOM'], all_sheets['MFG']
 
-
-# =====================
-# STEP 3: Load company Excel template
-# =====================
 def load_template(path):
-    """Loads the company Excel template from the specified path."""
     try:
         template_df = pd.read_excel(path)
-        print("✅ Template loaded successfully.")
         return template_df
     except Exception as e:
         raise FileNotFoundError(f"❌ Failed to load template: {e}")
 
-
-# =====================
-# STEP 4: Validate required columns in DataFrames
-# =====================
 def validate_required_columns(df, name, required_cols):
-    """
-    Validates that required columns exist.
-    Cleans the columns: strips whitespace + uppercases (for consistency).
-    Checks for empty values in required columns and fails if found.
-    """
-    #### Check that required columns exist
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         raise ValueError(f"❌ {name} is missing required columns: {', '.join(missing_cols)}")
-    #### Clean columns: strip whitespace and uppercase
     for col in required_cols:
         df[col] = df[col].astype(str).str.strip().str.upper()
-    
-    #### Check for empty values in required columns
-    empty_rows = df[df[required_cols].isin(['']).any(axis=1)] # This checks if any of the required columns have empty strings.
+    empty_rows = df[df[required_cols].isin(['']).any(axis=1)]
     if not empty_rows.empty:
         raise ValueError(f"❌ {name} has rows with missing data in required columns.")
 
-
-# =====================
-# STEP 5: Merge BOM and MFG DataFrames
-# =====================
 def merge_bom_mfg(bom_df, mfg_df, bom_keys, mfg_keys):
     merged = bom_df.merge(
         mfg_df,
         left_on=bom_keys, 
         right_on=mfg_keys, 
         how='left', 
-        suffixes=('', '_MFG') # suffixes=('', '_MFG'): if any columns (like DESCRIPTION) exist in both, the MFG version gets _MFG added so nothing is overwritten.
-        )
-    
-    # Drop any columns that start with 'ORIGINAL' except the 'ORIGINAL' column itself
+        suffixes=('', '_MFG')
+    )
     merged.drop(columns=[c for c in merged.columns if c.upper().startswith('ORIGINAL') and c != 'ORIGINAL'], inplace=True)
     return merged
-################
-# If multiple MFG rows match same BOM row → merge duplicates BOM row once per match.
-# If BOM or MFG has duplicate keys → may duplicate merged rows.
-################
 
-
-
-# =====================
-# STEP 6: Map customer columns to company template
-# =====================
 def map_columns_to_template(combined_df, column_mapping):
-    template_df = combined_df.rename(columns=column_mapping) # Rename columns to match template
-    template_df = template_df.reindex(columns=column_mapping.values()) # Reorder columns to match template
-    template_df.fillna('', inplace=True) # Replace NaN with empty strings
+    template_df = combined_df.rename(columns=column_mapping)
+    template_df = template_df.reindex(columns=column_mapping.values())
+    template_df.fillna('', inplace=True)
     return template_df
-
 
 def clean_output_df(df):
     return df.replace({pd.NaT: '', 'NaT': '', 'nan': ''}).fillna('')
 
-
-
-# =====================
-# STEP 7: Write filled Excel template with formatting
-# =====================
 def write_filled_template(template_df, bom_df, mfg_df, company_template_path, output_path, columns_to_extract):
    
     def write_dataframe_to_sheet(sheet, df, bold=True, center_headers=True):
@@ -262,68 +217,25 @@ def write_filled_template(template_df, bom_df, mfg_df, company_template_path, ou
 
 
 
-# =====================
-# STEP 8: Open output file (Windows only)
-# =====================
-def open_output_file(output_path):
-    """Opens the completed Excel file using system default app (works on Windows)."""
-    if os.path.exists(output_path):
-        os.startfile(output_path)
-    else:
-        print("❌ Completed file not saved.")
-
-
-# =====================
-# STEP 9: Generate console summary report
-# =====================
-def generate_summary_report(bom_df, combined_df):
-    """Prints summary report: counts, missing MPN/Mfr, etc."""
-    mask = combined_df['Customer_Part'].notna() & (combined_df['Customer_Part'].astype(str).str.strip() != '')
-    completed_df = combined_df[mask]
-
-
-    total_rows_bom = len(bom_df)
-    total_rows_output = len(completed_df)
-
-    missing_mpn = completed_df[completed_df['MPN'].isna() | (completed_df['MPN'].astype(str).str.strip() == '')]
-    missing_mfr = completed_df[completed_df['Mfr'].isna() | (completed_df['Mfr'].astype(str).str.strip() == '')]
-    missing_both = completed_df[
-        (completed_df['MPN'].isna() | (completed_df['MPN'].astype(str).str.strip() == '')) &
-        (completed_df['Mfr'].isna() | (completed_df['Mfr'].astype(str).str.strip() == ''))
-    ]
-
-    print("\n🔎 Summary Report:")
-    print(f"📄 Total rows in BOM: {total_rows_bom}")
-    print(f"📦 Total rows in output: {total_rows_output}")
-    print(f"✔️ Total valid parts: {len(completed_df)}")
-    print(missing_mpn['Customer_Part'].tolist())
-    print(f"⚠️ Missing MPN: {len(missing_mpn)}")
-    print(f"⚠️ Missing Mfr: {len(missing_mfr)}")
-    print(missing_mfr['Customer_Part'].tolist())
-    print(f"🚨 Missing BOTH MPN and Mfr: {len(missing_both)}")
-    print(missing_both['Customer_Part'].tolist())
-
-
-# =====================
-# MAIN WORKFLOW
-# =====================
-
-def main_process(input_path):
+def main_process(input_path, template_path=None):
+    """
+    input_path: path to uploaded BOM Excel (with 'BOM' and 'MFG')
+    template_path: path to company template Excel. If None, assumes 'QUOTE_TEMPLATE_AMAT-SINGLE.xlsx' in working dir.
+    Returns: output Excel file path (temp file).
+    """
     required_sheets = ['BOM', 'MFG']
-    company_template_path = "Renew_Template.xlsx"
+    if template_path is None:
+        template_path = "Renew_Template.xlsx"
 
-    # Load customer BOM from provided file path
-    all_sheets = load_customer_bom(input_path)
+    all_sheets = pd.read_excel(input_path, sheet_name=None)
     bom_df, mfg_df = validate_required_sheets(all_sheets, required_sheets)
-    template_df = load_template(company_template_path)
+    template_df = pd.read_excel(template_path)
 
-    # Ensure template has enough rows
     if len(bom_df) > len(template_df):
         extra = len(bom_df) - len(template_df)
         empty_rows = pd.DataFrame('', index=range(extra), columns=template_df.columns)
         template_df = pd.concat([template_df, empty_rows], ignore_index=True)
 
-    # Determine merge keys
     if bom_df['ORIGINAL'].nunique() == 1:
         bom_keys = ['PART_NUMBER']
         mfg_keys = ['PART_NUMBER']
@@ -335,7 +247,7 @@ def main_process(input_path):
     validate_required_columns(mfg_df, 'MFG', mfg_keys)
 
     combined_df = merge_bom_mfg(bom_df, mfg_df, bom_keys, mfg_keys)
-    template_filled_df = map_columns_to_template(combined_df, column_mapping={
+    column_mapping = {
         'LEVEL': 'Level',
         'ITEM_NUMBER': 'Dwg_Item',
         'PART_NUMBER': 'Customer_Part',
@@ -349,53 +261,79 @@ def main_process(input_path):
         'PTH_STOCK': 'PTH_Stock',
         'PC_MRP_FLAG': 'PC_MRP_YN',
         'NOTES': 'Notes'
-    })
+    }
+    template_filled_df = map_columns_to_template(combined_df, column_mapping)
 
-    # Load ERP data
-    engine = get_db_connection()
-    view_df = pd.read_sql("SELECT [Item Number], [Cost] FROM InventoryProductsView", engine)
+    # DB Enrichment
+    try:
+        conn = get_db_connection()
+    except pyodbc.Error as e:
+        raise RuntimeError(f"Database connection failed: {e}")
+
+    view_df = pd.read_sql("SELECT [Item Number], [Cost] FROM InventoryProductsView", conn)   
     inventory_df = pd.read_sql("""
         SELECT [Item Number], [Description], [Manufacturer], [Retail],
                [Inv_LastRetailUpdate], [Special Features]
         FROM Inventory
-    """, engine)
-    quantity_df = pd.read_sql("SELECT [Item Number], [SumOfQuantity In Stock] FROM QtyInStock", engine)
-    demand_df = pd.read_sql("""
-        SELECT [Item Number], SUM([Qty Needed]) AS TotalQtyNeeded FROM (
-            SELECT Kit.Kit_InvNum AS [Item Number], Kit.Kit_AllocQty AS [Qty Needed]
-            FROM Kit WHERE Kit.Kit_AllocQty <> 0 AND Kit.Kit_InvNum IS NOT NULL
+    """, conn)
+    quantity_df = pd.read_sql("SELECT [Item Number], [SumOfQuantity In Stock] FROM QtyInStock", conn)
+    demand_query = """
+        SELECT [Item Number], SUM([Qty Needed]) AS TotalQtyNeeded
+        FROM (
+            SELECT 
+                Kit.Kit_InvNum AS [Item Number],
+                Kit.Kit_AllocQty AS [Qty Needed]
+            FROM Kit
+            WHERE Kit.Kit_AllocQty <> 0
+            AND Kit.Kit_InvNum IS NOT NULL
+
             UNION ALL
-            SELECT Jobs.Jb_Part_Num AS [Item Number],
-                   COALESCE(JobShip.Sh_Qty_Due, 0) - COALESCE(JobShip.Sh_QtyPulled, 0)
-            FROM Jobs LEFT JOIN JobShip ON Jobs.Jb_Job_Num = JobShip.Sh_Job_Num
+
+            SELECT 
+                Jobs.Jb_Part_Num AS [Item Number],
+                COALESCE(JobShip.Sh_Qty_Due, 0) - COALESCE(JobShip.Sh_QtyPulled, 0) AS [Qty Needed]
+            FROM Jobs
+            LEFT JOIN JobShip ON Jobs.Jb_Job_Num = JobShip.Sh_Job_Num
             WHERE Jobs.Jb_Part_Num IS NOT NULL
-        ) AS InventoryAllocationsByPNQry GROUP BY [Item Number]
-    """, engine)
-    engine.close()
+        ) AS InventoryAllocationsByPNQry
+        GROUP BY [Item Number]
+    """
+    demand_df = pd.read_sql(demand_query, conn)
+    conn.close()
 
     for df in [view_df, inventory_df, quantity_df, demand_df]:
         df["Item Number"] = df["Item Number"].astype(str).str.strip().str.upper()
-        df.drop_duplicates(subset="Item Number", keep="first", inplace=True)
+    view_df = view_df.drop_duplicates(subset="Item Number", keep="first")
+    inventory_df = inventory_df.drop_duplicates(subset="Item Number", keep="first")
+    quantity_df = quantity_df.drop_duplicates(subset="Item Number", keep="first")
+    demand_df = demand_df.drop_duplicates(subset="Item Number", keep="first")
 
-    erp_combined = view_df.merge(inventory_df, on="Item Number", how="left")
-    erp_combined = erp_combined.merge(quantity_df, on="Item Number", how="left")
-    erp_combined = erp_combined.merge(demand_df, on="Item Number", how="left")
+    erp_combined = pd.merge(view_df, inventory_df, on="Item Number", how="left")
+    erp_combined = pd.merge(erp_combined, quantity_df, on="Item Number", how="left")
+    erp_combined = pd.merge(erp_combined, demand_df, on="Item Number", how="left")
+    erp_merged = pd.merge(template_filled_df, erp_combined, left_on="MPN", right_on="Item Number", how="left")
 
-    erp_merged = template_filled_df.merge(erp_combined, left_on="MPN", right_on="Item Number", how="left")
     erp_merged["Unit_Cost"] = erp_merged["Retail"]
     erp_merged["PTH_Stock"] = erp_merged["SumOfQuantity In Stock"]
     erp_merged["Notes"] = erp_merged["Special Features"]
+    erp_merged[["Unit_Cost", "PTH_Stock", "Notes"]] = erp_merged[["Unit_Cost", "PTH_Stock", "Notes"]].fillna('')
     erp_merged = erp_merged.applymap(clean_cell)
-    erp_merged["Unit_Cost"] = pd.to_numeric(erp_merged["Unit_Cost"], errors="coerce")
-    erp_merged = erp_merged.rename(columns={
+    template_filled_df = erp_merged
+    template_filled_df["Unit_Cost"] = pd.to_numeric(template_filled_df["Unit_Cost"], errors="coerce")
+    template_filled_df = template_filled_df.rename(columns={
         'Cost': 'Buyer_Cost',
         'TotalQtyNeeded': 'Demand',
         'Inv_LastRetailUpdate': 'Last_Cost_Update'
     })
 
-    # Output path to temp file
-    import tempfile
-    output_path = os.path.join(tempfile.gettempdir(), "Completed_Template.xlsx")
-    write_filled_template(erp_merged, bom_df, mfg_df, company_template_path, output_path, ['QUANTITY', 'PART_NUMBER', 'ITEM_NUMBER'])
+    columns_to_extract = ['QUANTITY', 'PART_NUMBER', 'ITEM_NUMBER']
 
+    # Save output to a temp file and return path
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp_output:
+        output_path = tmp_output.name
+
+    write_filled_template(
+        template_filled_df, bom_df, mfg_df,
+        template_path, output_path, columns_to_extract
+    )
     return output_path
