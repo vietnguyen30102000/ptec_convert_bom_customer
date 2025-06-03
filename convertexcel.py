@@ -5,24 +5,20 @@ from openpyxl.utils import get_column_letter
 from openpyxl import load_workbook
 import os
 import datetime
-import pyodbc
+# import pyodbc
 import streamlit as st
-import pyodbc
+from sqlalchemy import create_engine
+import urllib
 
 def get_db_connection():
     server = st.secrets["SQL_SERVER"]
     database = st.secrets["SQL_DATABASE"]
     username = st.secrets["SQL_USER"]
     password = st.secrets["SQL_PASSWORD"]
-    
-    conn_str = (
-        f'DRIVER={{SQL Server}};'
-        f'SERVER={server};'
-        f'DATABASE={database};'
-        f'UID={username};'
-        f'PWD={password}'
-    )
-    return pyodbc.connect(conn_str)
+
+    connection_url = f"mssql+pytds://{username}:{password}@{server}/{database}"
+    engine = create_engine(connection_url)
+    return engine
 
 def clean_cell(val):
     try:
@@ -356,14 +352,14 @@ def main_process(input_path):
     })
 
     # Load ERP data
-    conn = get_db_connection()
-    view_df = pd.read_sql("SELECT [Item Number], [Cost] FROM InventoryProductsView", conn)
+    engine = get_db_connection()
+    view_df = pd.read_sql("SELECT [Item Number], [Cost] FROM InventoryProductsView", engine)
     inventory_df = pd.read_sql("""
         SELECT [Item Number], [Description], [Manufacturer], [Retail],
                [Inv_LastRetailUpdate], [Special Features]
         FROM Inventory
-    """, conn)
-    quantity_df = pd.read_sql("SELECT [Item Number], [SumOfQuantity In Stock] FROM QtyInStock", conn)
+    """, engine)
+    quantity_df = pd.read_sql("SELECT [Item Number], [SumOfQuantity In Stock] FROM QtyInStock", engine)
     demand_df = pd.read_sql("""
         SELECT [Item Number], SUM([Qty Needed]) AS TotalQtyNeeded FROM (
             SELECT Kit.Kit_InvNum AS [Item Number], Kit.Kit_AllocQty AS [Qty Needed]
@@ -374,8 +370,8 @@ def main_process(input_path):
             FROM Jobs LEFT JOIN JobShip ON Jobs.Jb_Job_Num = JobShip.Sh_Job_Num
             WHERE Jobs.Jb_Part_Num IS NOT NULL
         ) AS InventoryAllocationsByPNQry GROUP BY [Item Number]
-    """, conn)
-    conn.close()
+    """, engine)
+    engine.close()
 
     for df in [view_df, inventory_df, quantity_df, demand_df]:
         df["Item Number"] = df["Item Number"].astype(str).str.strip().str.upper()
